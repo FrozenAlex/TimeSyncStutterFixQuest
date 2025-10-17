@@ -103,10 +103,11 @@ MAKE_HOOK_MATCH(
     static double_t dspCorrectionOffset = 0.0f;
     static double_t oldDeltaDSPUnity = 0.0f;
 
-    if (self->_lastState != self->_state) {
-      DEBUG("AudioTimeSyncController state changed from {} to {}", static_cast<int>(self->_lastState), static_cast<int>(self->_state));
-      self->_lastState = self->_state;
-    }
+    // Used only for logging state changes
+    // if (self->_lastState != self->_state) {
+    //   DEBUG("AudioTimeSyncController state changed from {} to {}", static_cast<int>(self->_lastState), static_cast<int>(self->_state));
+    //   self->_lastState = self->_state;
+    // }
 
     if (self->_state == GlobalNamespace::AudioTimeSyncController::State::Stopped) {
       // self->_dspTimeOffset = UnityEngine::AudioSettings::get_dspTime();
@@ -149,6 +150,7 @@ MAKE_HOOK_MATCH(
       
       self->_dspTimeOffset = self->_dspTimeProvider->dspTime - self->_songTime;
       self->_isReady = true;
+      return;
     }
     
     if (self->timeSinceStart < self->_audioStartTimeOffsetSinceStart) {
