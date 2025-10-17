@@ -257,6 +257,8 @@ MAKE_HOOK_MATCH(
         (deltaTime > self->_forcedSyncDeltaTime || self->_state == ::GlobalNamespace::AudioTimeSyncController_State::Paused) && 
         (!self->forcedNoAudioSync)
       ) {
+        DEBUG("Forcing audio sync: unityClockTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", unityClockTime, audioSourceTime, unityClockTime - audioSourceTime, self->_audioLatency, self->_songTime);
+        
         self->_audioStartTimeOffsetSinceStart =  self->timeSinceStart - audioSourceTime;
         unityClockTime = audioSourceTime;
       // meanwhile this code does a lerp to bring the song and notes back into sync more smoothly
