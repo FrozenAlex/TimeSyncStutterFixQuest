@@ -133,12 +133,12 @@ MAKE_HOOK_MATCH(
     }
 
     // Delta scaled by song speed scale
-    float_t frameDeltaSongTime = UnityEngine::Time::get_deltaTime() * self->_timeScale; // num1
-    self->_lastFrameDeltaSongTime = frameDeltaSongTime;
+    float_t _lastFrameDeltaSongTime = UnityEngine::Time::get_deltaTime() * self->_timeScale; // num1
+    self->_lastFrameDeltaSongTime = _lastFrameDeltaSongTime;
 
     // If is running in capture framerate mode, just advance song time by delta time
     if (UnityEngine::Time::get_captureFramerate() != 0) {
-      self->_songTime += frameDeltaSongTime;
+      self->_songTime += _lastFrameDeltaSongTime;
       
       if (!self->_audioSource->loop) {
         self->_songTime = std::fmin(self->_songTime, self->_audioSource->clip->length - 0.01f);
@@ -152,7 +152,7 @@ MAKE_HOOK_MATCH(
     }
     
     if (self->timeSinceStart < self->_audioStartTimeOffsetSinceStart) {
-      self->_songTime += frameDeltaSongTime;
+      self->_songTime += _lastFrameDeltaSongTime;
       return;
     }
     
@@ -192,21 +192,28 @@ MAKE_HOOK_MATCH(
       return;
     }
 
+    // timeSamples is used here to have an exact measurement of whether or not the audioSource's reported time has been updated
     int timeSamples = self->_audioSource->timeSamples;
     float_t audioSourceTime = self->_audioSource->time; //num2
-    float_t dspTime = self->timeSinceStart - self->_audioStartTimeOffsetSinceStart; // num3
+    float_t unityClockTime = self->timeSinceStart - self->_audioStartTimeOffsetSinceStart; // num3
 
+    // idk why they keep track of loops
     if (self->_prevAudioSamplePos > timeSamples) {
       self->_playbackLoopIndex++;
     }
+
+    // it's named pretty clearly, but basically this is to compensate for the audio thread not updating its time often enough
+	  // (dsp time means Digital Signal Processor time, which is the audio)
     if (self->_prevAudioSamplePos == timeSamples) {
-      self->_inBetweenDSPBufferingTimeEstimate += frameDeltaSongTime;
+      self->_inBetweenDSPBufferingTimeEstimate += _lastFrameDeltaSongTime;
     } else {
       self->_inBetweenDSPBufferingTimeEstimate = 0.0f;
     }
     self->_prevAudioSamplePos = timeSamples;
 
-    audioSourceTime += self->_playbackLoopIndex * self->_audioSource->clip->length / self->_timeScale + self->_inBetweenDSPBufferingTimeEstimate;
+    // here is where they actually apply the buffer compensation (plus loops for whatever reason)
+    audioSourceTime += static_cast<float_t>(self->_playbackLoopIndex) * self->_audioSource->clip->length / self->_timeScale + self->_inBetweenDSPBufferingTimeEstimate;
+
 
     // DSP time without offset correction
     double_t dspRawTime = GetDSPClock() / static_cast<double_t>(UnityEngine::AudioSettings::get_outputSampleRate());
@@ -227,41 +234,46 @@ MAKE_HOOK_MATCH(
       }
     }
     
-
+    // This does not really get used by the song syncing, we need to find another way.
     double_t dspCurrentTime;
     if (UnityDSP) {
       dspCurrentTime = unityDspTime; // Unity for comparison
     } else {
       dspCurrentTime = dspRawTime + dspCorrectionOffset;
     }
+
+    // this field isn't used for syncing the song, just sound effects such as note cuts
     self->_dspTimeOffset = dspCurrentTime;
     
 
     if (!self->_forceNoAudioSyncOrAudioSyncErrorFixing) {
-      float_t differenceWithDSP = std::fabs(dspTime - audioSourceTime); // num4
+      // for some context, the _audioStartTimeOffsetSinceStart field is used as the difference between main thread time and audio thread time
+		  // if everything is perfectly synced, it will be equal to timeSinceStart - audioSourceTime
+      float_t deltaTime = std::fabs(unityClockTime - audioSourceTime); // num4
+      // here is forced sync which can cause really sharp stutters, since it immediately teleports the time
       if (
-        (differenceWithDSP > self->_forcedSyncDeltaTime || self->_state == ::GlobalNamespace::AudioTimeSyncController_State::Paused) && 
+        (deltaTime > self->_forcedSyncDeltaTime || self->_state == ::GlobalNamespace::AudioTimeSyncController_State::Paused) && 
         (!self->forcedNoAudioSync)
       ) {
-        // Correction takes place here
         self->_audioStartTimeOffsetSinceStart =  self->timeSinceStart - audioSourceTime;
-        dspTime = audioSourceTime;
+        unityClockTime = audioSourceTime;
+      // meanwhile this code does a lerp to bring the song and notes back into sync more smoothly
       } else {
         if (self->____fixingAudioSyncError) {
-          if (differenceWithDSP < self->_stopSyncDeltaTime) {
+          if (deltaTime < self->_stopSyncDeltaTime) {
             self->_fixingAudioSyncError = false;
           }
-        } else if (differenceWithDSP > self->_startSyncDeltaTime) {
+        } else if (deltaTime > self->_startSyncDeltaTime) {
           self->_fixingAudioSyncError = true;
         }
         if (self->_fixingAudioSyncError) {
-          DEBUG("Fixing audio sync error: dspTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", dspTime, audioSourceTime, differenceWithDSP, self->_audioLatency, self->_songTime);
-          self->____audioStartTimeOffsetSinceStart = std::lerp(self->_audioStartTimeOffsetSinceStart, self->timeSinceStart - audioSourceTime, frameDeltaSongTime * self->_audioSyncLerpSpeed);
+          DEBUG("Fixing audio sync error: unityClockTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", unityClockTime, audioSourceTime, unityClockTime, self->_audioLatency, self->_songTime);
+          self->_audioStartTimeOffsetSinceStart = std::lerp(self->_audioStartTimeOffsetSinceStart, self->timeSinceStart - audioSourceTime, self->_lastFrameDeltaSongTime * self->_audioSyncLerpSpeed);
         }
       }
     }
 
-    float_t newSongTime = std::fmax(self->_songTime, dspTime - (self->_songTimeOffset + self->_audioLatency)); // num5
+    float_t newSongTime = std::fmax(self->_songTime, unityClockTime - (self->_songTimeOffset + self->_audioLatency));
     self->_lastFrameDeltaSongTime = newSongTime - self->_songTime;
     self->_songTime = newSongTime;
     self->_isReady = true;
