@@ -23,9 +23,6 @@
 #include "beatsaber-hook/shared/utils/logging.hpp"
 #include <cmath>
 
-// Use Unity's DSP time instead of raw DSP time
-const bool UnityDSP = false;
-
 static modloader::ModInfo modInfo{MOD_ID, VERSION, 0};
 // Stores the ID and version of our mod, and is sent to
 // the modloader upon startup
@@ -39,14 +36,12 @@ MOD_EXTERN_FUNC void setup(CModInfo *info) noexcept {
   INFO("Completed setup!");
 }
 
-// First method
 MAKE_HOOK_MATCH(
     AudioTimeSyncController_Awake,
     &GlobalNamespace::AudioTimeSyncController::Awake,
     void,
     GlobalNamespace::AudioTimeSyncController* self
 ) {
-    // DEBUG("Set forced sync delta time to {}", self->_forcedSyncDeltaTime);
     // Force sync in the beginning of the song to be very tight to prevent initial desync (for 0.6s)
     self->_forcedSyncDeltaTime = 0.01f; // 10ms
     // Desync at which we start smooth correction of audio time
@@ -67,8 +62,6 @@ long GetDSPClock() {
     return *(long*) (system + 0xc78);
 }
 
-
-// Third method
 MAKE_HOOK_MATCH(
     AudioTimeSyncController_Update,
     &GlobalNamespace::AudioTimeSyncController::Update,
@@ -186,24 +179,6 @@ MAKE_HOOK_MATCH(
 
     // here is where they actually apply the buffer compensation (plus loops for whatever reason)
     audioSourceTime += static_cast<float_t>(self->_playbackLoopIndex) * self->_audioSource->clip->length / self->_timeScale + self->_inBetweenDSPBufferingTimeEstimate;
-
-    // double_t dspRawTime = GetDSPClock() / static_cast<double_t>(UnityEngine::AudioSettings::get_outputSampleRate());
-    // double_t unityDspTime =
-    // // Correct dsp time with offset
-    // {
-    //   double_t delta = fabs(dspRawTime + dspCorrectionOffset - unityDspTime);
-    //   if (delta > 0.5f) {
-    //     dspCorrectionOffset = unityDspTime - dspRawTime;
-    //     DEBUG("DSP correction offset set to {}", dspCorrectionOffset);
-    //   }
-
-    //   // Log only if update is significant
-    //   double_t newDelta = (dspRawTime + dspCorrectionOffset) - unityDspTime;
-    //   if (fabs(newDelta) > 0.001f  && newDelta != oldDeltaDSPUnity) {
-    //     DEBUG("Delta Unity and Raw DSP: {}", newDelta);
-    //     oldDeltaDSPUnity = newDelta;
-    //   }
-    // }
     
     // this field isn't used for syncing the song, just sound effects such as note cuts
     self->_dspTimeOffset = UnityEngine::AudioSettings::get_dspTime();;
@@ -272,14 +247,7 @@ MOD_EXTERN_FUNC void late_load() noexcept {
 
   INFO("Installing hooks...");
 
-  // First method hook
   INSTALL_HOOK(Logger, AudioTimeSyncController_Awake);
-
-  // Second method hook
-  // INSTALL_HOOK(Logger, AudioTimeSyncController_Start);
-  // INSTALL_HOOK(Logger, AudioTimeSyncController_Update);
-
-  // Third method hook
   INSTALL_HOOK(Logger, AudioTimeSyncController_Update);
 
   INFO("Installed all hooks!");
