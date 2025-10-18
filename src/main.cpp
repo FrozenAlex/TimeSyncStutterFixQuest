@@ -40,43 +40,19 @@ MOD_EXTERN_FUNC void setup(CModInfo *info) noexcept {
 }
 
 // First method
-// MAKE_HOOK_MATCH(
-//     AudioTimeSyncController_Awake,
-//     &GlobalNamespace::AudioTimeSyncController::Awake,
-//     void,
-//     GlobalNamespace::AudioTimeSyncController* self
-// ) {
-//     // DEBUG("Set forced sync delta time to {}", self->_forcedSyncDeltaTime);
-//     self->_forcedSyncDeltaTime = 0.1f; // 100ms
-//     AudioTimeSyncController_Awake(self);
-// };
-
-// Second method 
-// MAKE_HOOK_MATCH(
-//     AudioTimeSyncController_Start,
-//     &GlobalNamespace::AudioTimeSyncController::Start,
-//     void,
-//     GlobalNamespace::AudioTimeSyncController* self
-// ) {
-//     AudioTimeSyncController_Start(self);
-//     self->_startSyncDeltaTime = 0.2f; // 200ms
-//     self->_forcedSyncDeltaTime = 0.01f; // 10ms
-// }
-
-// MAKE_HOOK_MATCH(
-//     AudioTimeSyncController_Update,
-//     &GlobalNamespace::AudioTimeSyncController::Update,
-//     void,
-//     GlobalNamespace::AudioTimeSyncController* self
-// ) {
-//     AudioTimeSyncController_Update(self);
-//     if (
-//       (self->songTime > 0.6f && UnityEngine::Time::get_timeSinceLevelLoad() > 1.0f) 
-//       || self->songLength < 15.0f)
-//     {
-//         self->_forcedSyncDeltaTime = 0.3f; // 300ms
-//     }
-// }
+MAKE_HOOK_MATCH(
+    AudioTimeSyncController_Awake,
+    &GlobalNamespace::AudioTimeSyncController::Awake,
+    void,
+    GlobalNamespace::AudioTimeSyncController* self
+) {
+    // DEBUG("Set forced sync delta time to {}", self->_forcedSyncDeltaTime);
+    // Force sync in the beginning of the song to be very tight to prevent initial desync (for 0.6s)
+    self->_forcedSyncDeltaTime = 0.01f; // 10ms
+    // Desync at which we start smooth correction of audio time
+    self->_startSyncDeltaTime = 0.1f; // 100ms
+    AudioTimeSyncController_Awake(self);
+};
 
 MAKE_HOOK_NO_CATCH(fmod_output_mix, 0x0, int, char* output, void* p1, uint p2) {
   if (output != gOutput) {
@@ -104,32 +80,13 @@ MAKE_HOOK_MATCH(
     static double_t oldDeltaDSPUnity = 0.0f;
 
     // Used only for logging state changes
-    // if (self->_lastState != self->_state) {
-    //   DEBUG("AudioTimeSyncController state changed from {} to {}", static_cast<int>(self->_lastState), static_cast<int>(self->_state));
-    //   self->_lastState = self->_state;
-    // }
+    if (self->_lastState != self->_state) {
+      DEBUG("AudioTimeSyncController state changed from {} to {}", static_cast<int>(self->_lastState), static_cast<int>(self->_state));
+      self->_lastState = self->_state;
+    }
 
     if (self->_state == GlobalNamespace::AudioTimeSyncController::State::Stopped) {
-      // self->_dspTimeOffset = UnityEngine::AudioSettings::get_dspTime();
-      double_t dspRawTime = GetDSPClock() / static_cast<double_t>(UnityEngine::AudioSettings::get_outputSampleRate());
-      double_t unityDspTime = UnityEngine::AudioSettings::get_dspTime();
-      double_t delta = fabs(dspRawTime + dspCorrectionOffset - unityDspTime);
-      if (delta > 0.5f) {
-        dspCorrectionOffset = unityDspTime - dspRawTime;
-        DEBUG("DSP correction offset set to {}", dspCorrectionOffset);
-      }
-
-      if (UnityDSP) {
-        self->_dspTimeOffset = unityDspTime; // Unity for comparison
-      } else {
-        self->_dspTimeOffset = dspRawTime + dspCorrectionOffset;
-      }
-      
-      double_t newDelta = (dspRawTime + dspCorrectionOffset) - unityDspTime;
-      if (fabs(newDelta) > 0.001f  && newDelta != oldDeltaDSPUnity) {
-        DEBUG("Delta Unity and Raw DSP: {}", newDelta);
-        oldDeltaDSPUnity = newDelta;
-      }
+      self->_dspTimeOffset = UnityEngine::AudioSettings::get_dspTime(); // Unity for comparison
       return;
     }
 
@@ -196,7 +153,21 @@ MAKE_HOOK_MATCH(
 
     // timeSamples is used here to have an exact measurement of whether or not the audioSource's reported time has been updated
     int timeSamples = self->_audioSource->timeSamples;
-    float_t audioSourceTime = self->_audioSource->time; //num2
+    
+    // Attempt to sync this time to DSP
+    static float_t dspAudioSourceOffset = 0.0f;
+    float_t audioSourceTime = self->_audioSource->time; // clock with no offset so far
+    // Smooth out AudioSource time using DSP clock
+    {
+      double_t dspRawTime = GetDSPClock() / static_cast<double_t>(UnityEngine::AudioSettings::get_outputSampleRate());
+      
+      double_t delta = fabs(dspRawTime + dspAudioSourceOffset - audioSourceTime);
+      if (delta > 0.5f) {
+        dspAudioSourceOffset = audioSourceTime - dspRawTime;
+        DEBUG("AudioSource DSP offset set to {}", dspAudioSourceOffset);
+      }
+      audioSourceTime = dspRawTime + dspAudioSourceOffset;
+    }
     float_t unityClockTime = self->timeSinceStart - self->_audioStartTimeOffsetSinceStart; // num3
 
     // idk why they keep track of loops
@@ -216,37 +187,26 @@ MAKE_HOOK_MATCH(
     // here is where they actually apply the buffer compensation (plus loops for whatever reason)
     audioSourceTime += static_cast<float_t>(self->_playbackLoopIndex) * self->_audioSource->clip->length / self->_timeScale + self->_inBetweenDSPBufferingTimeEstimate;
 
+    // double_t dspRawTime = GetDSPClock() / static_cast<double_t>(UnityEngine::AudioSettings::get_outputSampleRate());
+    // double_t unityDspTime =
+    // // Correct dsp time with offset
+    // {
+    //   double_t delta = fabs(dspRawTime + dspCorrectionOffset - unityDspTime);
+    //   if (delta > 0.5f) {
+    //     dspCorrectionOffset = unityDspTime - dspRawTime;
+    //     DEBUG("DSP correction offset set to {}", dspCorrectionOffset);
+    //   }
 
-    // DSP time without offset correction
-    double_t dspRawTime = GetDSPClock() / static_cast<double_t>(UnityEngine::AudioSettings::get_outputSampleRate());
-    double_t unityDspTime = UnityEngine::AudioSettings::get_dspTime();
-    // Correct dsp time with offset
-    {
-      double_t delta = fabs(dspRawTime + dspCorrectionOffset - unityDspTime);
-      if (delta > 0.5f) {
-        dspCorrectionOffset = unityDspTime - dspRawTime;
-        DEBUG("DSP correction offset set to {}", dspCorrectionOffset);
-      }
-
-      // Log only if update is significant
-      double_t newDelta = (dspRawTime + dspCorrectionOffset) - unityDspTime;
-      if (fabs(newDelta) > 0.001f  && newDelta != oldDeltaDSPUnity) {
-        DEBUG("Delta Unity and Raw DSP: {}", newDelta);
-        oldDeltaDSPUnity = newDelta;
-      }
-    }
+    //   // Log only if update is significant
+    //   double_t newDelta = (dspRawTime + dspCorrectionOffset) - unityDspTime;
+    //   if (fabs(newDelta) > 0.001f  && newDelta != oldDeltaDSPUnity) {
+    //     DEBUG("Delta Unity and Raw DSP: {}", newDelta);
+    //     oldDeltaDSPUnity = newDelta;
+    //   }
+    // }
     
-    // This does not really get used by the song syncing, we need to find another way.
-    double_t dspCurrentTime;
-    if (UnityDSP) {
-      dspCurrentTime = unityDspTime; // Unity for comparison
-    } else {
-      dspCurrentTime = dspRawTime + dspCorrectionOffset;
-    }
-
     // this field isn't used for syncing the song, just sound effects such as note cuts
-    self->_dspTimeOffset = dspCurrentTime;
-    
+    self->_dspTimeOffset = UnityEngine::AudioSettings::get_dspTime();;
 
     if (!self->_forceNoAudioSyncOrAudioSyncErrorFixing) {
       // for some context, the _audioStartTimeOffsetSinceStart field is used as the difference between main thread time and audio thread time
@@ -257,8 +217,7 @@ MAKE_HOOK_MATCH(
         (deltaTime > self->_forcedSyncDeltaTime || self->_state == ::GlobalNamespace::AudioTimeSyncController_State::Paused) && 
         (!self->forcedNoAudioSync)
       ) {
-        DEBUG("Forcing audio sync: unityClockTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", unityClockTime, audioSourceTime, unityClockTime - audioSourceTime, self->_audioLatency, self->_songTime);
-        
+        DEBUG("Forcing audio sync: unityClockTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", unityClockTime, audioSourceTime, (unityClockTime - audioSourceTime), self->_audioLatency, self->_songTime);
         self->_audioStartTimeOffsetSinceStart =  self->timeSinceStart - audioSourceTime;
         unityClockTime = audioSourceTime;
       // meanwhile this code does a lerp to bring the song and notes back into sync more smoothly
@@ -271,7 +230,7 @@ MAKE_HOOK_MATCH(
           self->_fixingAudioSyncError = true;
         }
         if (self->_fixingAudioSyncError) {
-          DEBUG("Fixing audio sync error: unityClockTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", unityClockTime, audioSourceTime, unityClockTime, self->_audioLatency, self->_songTime);
+          DEBUG("Fixing audio sync error: unityClockTime={}, audioSourceTime={}, difference={}, audioLatency={}, songTime={}", unityClockTime, audioSourceTime,  (unityClockTime - audioSourceTime), self->_audioLatency, self->_songTime);
           self->_audioStartTimeOffsetSinceStart = std::lerp(self->_audioStartTimeOffsetSinceStart, self->timeSinceStart - audioSourceTime, self->_lastFrameDeltaSongTime * self->_audioSyncLerpSpeed);
         }
       }
@@ -281,6 +240,14 @@ MAKE_HOOK_MATCH(
     self->_lastFrameDeltaSongTime = newSongTime - self->_songTime;
     self->_songTime = newSongTime;
     self->_isReady = true;
+
+    // Adjust forced sync delta time based on song length and time to prevent stutter after start of song (related to Awake hook)
+    if (
+      (self->songTime > 0.6f && UnityEngine::Time::get_timeSinceLevelLoad() > 1.0f) 
+      || self->songLength < 15.0f)
+    {
+        self->_forcedSyncDeltaTime = 0.3f; // 300ms
+    }
 }
 
 
@@ -306,7 +273,7 @@ MOD_EXTERN_FUNC void late_load() noexcept {
   INFO("Installing hooks...");
 
   // First method hook
-  // INSTALL_HOOK(Logger, AudioTimeSyncController_Awake);
+  INSTALL_HOOK(Logger, AudioTimeSyncController_Awake);
 
   // Second method hook
   // INSTALL_HOOK(Logger, AudioTimeSyncController_Start);
